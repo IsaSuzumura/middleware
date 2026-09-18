@@ -1,0 +1,90 @@
+import os
+import json
+import ssl
+import paho.mqtt.client as mqtt
+from supabase import create_client, Client
+from dotenv import load_dotenv
+
+# Carrega as variáveis do arquivo .env
+load_dotenv()
+
+# ==========================================
+# CONFIGURAÇÕES DO SUPABASE
+# ==========================================
+url: str = os.getenv("SUPABASE_URL")
+key: str = os.getenv("SUPABASE_KEY")
+supabase: Client = create_client(url, key)
+
+# ==========================================
+# CONFIGURAÇÕES DO MQTT
+# ==========================================
+MQTT_BROKER = os.getenv("MQTT_BROKER")
+MQTT_PORT = int(os.getenv("MQTT_PORT", 8883)) # 8883 é o padrão para TLS no HiveMQ
+MQTT_USER = os.getenv("MQTT_USER")
+MQTT_PASSWORD = os.getenv("MQTT_PASSWORD")
+
+# Ajuste para o mesmo tópico que o arquivo main.py do ESP32 utiliza para publicar os dados
+MQTT_TOPIC = "estufa/telemetria" 
+
+def on_connect(client, userdata, flags, rc):
+    """Callback executado quando o cliente se conecta ao broker."""
+    if rc == 0:
+        print("✅ Conectado ao Broker MQTT (HiveMQ Cloud) com sucesso!")
+        # Subscreve ao tópico assim que conecta
+        client.subscribe(MQTT_TOPIC)
+        print(f"📡 Inscrito no tópico: {MQTT_TOPIC}")
+    else:
+        print(f"❌ Falha na conexão. Código de retorno: {rc}")
+
+def on_message(client, userdata, msg):
+    """Callback executado toda vez que uma nova mensagem chega no tópico subscrito."""
+    try:
+        # Decodifica o payload recebido do ESP32
+        payload = msg.payload.decode('utf-8')
+        dados = json.loads(payload)
+        print(f"\n📥 Nova leitura recebida: {dados}")
+
+        # Estrutura os dados para a tabela 'leituras_estufa' conforme definido no TCC
+        registro = {
+            "temperatura": dados.get("temperatura"),
+            "umidade_ar": dados.get("umidade_ar"),
+            "umidade_solo": dados.get("umidade_solo"),
+            "luminosidade": dados.get("luminosidade")
+        }
+
+        # Insere o registro no Supabase
+        # Obs: As colunas 'id' e 'timestamp' são geradas automaticamente pelo banco
+        resposta = supabase.table("leituras_estufa").insert(registro).execute()
+        print(f"💾 Dados persistidos no Supabase com sucesso! ID: {resposta.data[0]['id']}")
+
+    except json.JSONDecodeError:
+        print("⚠️ Erro: O payload recebido não está no formato JSON válido.")
+    except Exception as e:
+        print(f"❌ Erro ao processar ou inserir dados: {e}")
+
+# ==========================================
+# INICIALIZAÇÃO DO CLIENTE MQTT
+# ==========================================
+client = mqtt.Client()
+
+# Define usuário e senha (Obrigatório no HiveMQ Cloud)
+client.username_pw_set(MQTT_USER, MQTT_PASSWORD)
+
+# Configura o TLS (Criptografia). O HiveMQ Cloud recusa conexões sem TLS (Porta 8883)
+client.tls_set(cert_reqs=ssl.CERT_REQUIRED, tls_version=ssl.PROTOCOL_TLS)
+
+# Vincula os callbacks
+client.on_connect = on_connect
+client.on_message = on_message
+
+if __name__ == "__main__":
+    try:
+        print("⏳ Iniciando middleware e conectando ao HiveMQ Cloud...")
+        client.connect(MQTT_BROKER, MQTT_PORT, 60)
+        
+        # Mantém o script rodando infinitamente, escutando mensagens
+        client.loop_forever()
+        
+    except KeyboardInterrupt:
+        print("\n🛑 Middleware encerrado pelo usuário.")
+        client.disconnect()
